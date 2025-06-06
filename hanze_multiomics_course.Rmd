@@ -1,468 +1,445 @@
----
-title: "hanze_multiomics_course"
-author: "Roy Oelen"
-date: "2025-06-05"
-output: html_document
----
 
-```{r header, include=TRUE}
-knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
-
-#!/usr/bin/env Rscript
-############################################################################################################################
-# Authors: Roy Oelen
-# Name: hanze_multiomics_course.Rmd
-# Function: show usage of multi-omics data at the single-nucleus level using Seurat/Signac
-############################################################################################################################
-```
-
-# Hanze multi-omics workshop
-
-This is the multi-omics workshop, where we'll take a look at a multi-omics dataset and use multi-omics data to do cell type annotation
-
-
-## required software
-
-For this workshop, we'll need R, which you can obtain here: <https://www.r-project.org/> It is also very much recommended to use an Interactive Development Environment, as we'll look at some plots while we are coding. You are free to use any IDE, but I will show examples using Rstudio: <https://posit.co/download/rstudio-desktop/>
-
-We will also need a number of libraries available in R, which we can install using R itself:
-
-
-```{r install_packages, include=TRUE, eval=FALSE}
-knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
-
-# install packages
-install.packages('Seurat')
-install.packages('Signac')
-install.packages('SeuratDisk')
-install.packages('ggplot2')
-install.packages('knitr')
-
-```
-
-
-Which we can next load
-
-
-```{r load_packages, include=TRUE, eval=TRUE}
-knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
-
-# install packages
-library('Seurat')
-library('Signac')
-library('SeuratDisk')
-library('ggplot2')
-library('knitr')
-
-```
-
-
-## required data
-
-Additionally, we'll also need some multi-omics data to work with. Data is available here: <https://drive.google.com/drive/folders/1Wtm2vtiwm-CYpENifeNQNfpC-MbW6F9l?usp=sharing>
-
-The only object we'll need for now, is 10k_multimodal_object_processed_nocelltype.rds. This is a multi-omics dataset with both gene expression and chromatin accessibility data for individual immune cells, generated with the 10x multiome protocol
-
-Let's load this data:
-
-
-```{r load_object, include=TRUE, eval=TRUE}
-knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
-
-# set location of where we saved this object
-mo_object_loc <- '/groups/umcg-franke-scrna/tmp04/external_datasets/10x_multiome_10k_pbmcs/multimodal/10k_multimodal_object_processed_nocelltype.rds'
-# now load this object
-mo_object <- readRDS(mo_object_loc)
-
-```
-
-
-## inspect data
-
-You might not have worked with this type of data before, so let's take a look at it. A Seurat object is one of the ways to store this type of data, and is a rather complex R object. You can just use the variable name here and see there is all sorts of data stored. There is data for a certain amount of cells, at different modalities. We'll start with the expression data first, this is saved under the assays property. Let's see what is there.
-
-
-```{r check_rna_assay1, include=TRUE, eval=TRUE}
-knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, max.print=10)
-
-# we'll make sure not to print too much
-options(max.print=10)
-
-# check the object by itself
-mo_object
-# check what we have for the assays
-mo_object@assays
-# and specifically for the RNA one
-mo_object@assays$RNA
-# which seems to have layers
-str(mo_object@assays$RNA@layers) # we'll use str to make sure the print doesn't get too big
-
-```
-
-
-There are multiple layers there. As often with data analysis, the data needs to be normalized so that it is comparable and you reduce batch effects. These different layers represent different versions of the same data. 'counts' is the raw expression data, 'data' is the data normalized for the sequencing depth, and 'scale.data' is next the same data scaled around zero. We can take a look at the first ten genes of the first ten cells like this
-
-
-```{r check_rna_assay2, include=TRUE, eval=TRUE}
-knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
-
-# check counts
-mo_object@assays$RNA@layers$counts[11:20, 11:20]
-# and data
-mo_object@assays$RNA@layers$data[11:20, 11:20]
-# and scale.data
-mo_object@assays$RNA@layers$scale.data[11:20, 11:20]
-
-```
-
-
-What you will see for the first and second layers, are sparse matrices. What this means is that the zeroes in the data are not saved with full precision, but instead what is saved is the number of rows and columns, the locations in the matrix where the value is NOT zero, and what those values are. Expression and accessibility is very zero-inflated, meaning it contains mostly zeroes. By just saving the locations and values of the NOT zero values, we can save a lot memory. The data that is scaled around zero, will not be zero-inflated, and as such will also take up a lot more space in memory.
-
-There are no row and column names here, so this needs a bit of explanation. The rows here are the genes, and the columns are the cells. You usually do not interact with these matrices directly though.
-
-We can also look at the accessibility data, and we see that looks quite similiar, except there are no 'layers', this is because the chromatin library is slightly older. There is also no scale.data.
-
-
-```{r check_peaks_assay, include=TRUE, eval=TRUE}
-knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
-
-# check counts
-mo_object@assays$peaks$counts[11:20, 11:20]
-# and data
-mo_object@assays$peaks$data[11:20, 11:20]
-
-```
-
-
-Let's look at the data in a different way. We can look at the expression of a specific gene across all cells in a violin plot
-
-
-```{r gene_exp_all, include=TRUE, eval=TRUE, fig.width = 14, fig.height = 7}
-knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
-
-# we are looking at RNA data
-DefaultAssay(mo_object) <- 'RNA'
-# and making a plot
-VlnPlot(mo_object, features = c('CD14', 'FCGR3A'))
-
-```
-
-
-You might be wondering what everything is in this plot. Every dot is a cell. On the y axis is the expression of that gene for that cell. On the X-axis is the cluster the cell belongs to.
-
-
-## dimensionality reduction
-
-Expression data alone contains more than 36000 genes, so to profile these cells, we may want to reduce the dimensionality of the data. Usually we run PCA first. We can see how the first two first PCs look
-
-
-```{r pca_plot, include=TRUE, eval=TRUE, fig.width = 7, fig.height = 7}
-knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
-
-# make a dimension plot of the first two PCs
-DimPlot(mo_object, reduction = 'pca', group.by = 'seurat_clusters')
-
-```
-
-
-Again, each point is an individual cell. Here we already see the data splitting up. What was previously done however, is that KNN-clustering was done on those principal components, to get to the clusters. With PCA we can only look at two dimensions at a time though. We can do further dimensional reduction using UMAP, the result of which we can also visualize
-
-
-```{r rna_umap_plot, include=TRUE, eval=TRUE, fig.width = 7, fig.height = 7}
-knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
-
-# make a plot of the 2d UMAP of the RNA data
-DimPlot(mo_object, reduction = 'umap.rna', group.by = 'seurat_clusters')
-
-```
-
-
-That was at the RNA level though. If we look at the ATAC data instead, the plot might look a bit different, as the information in the chromatin data is different from the expression data.
-
-
-```{r atac_umap_plot, include=TRUE, eval=TRUE, fig.width = 7, fig.height = 7}
-knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
-
-# make a plot of the 2d UMAP of the RNA data
-DimPlot(mo_object, reduction = 'umap.atac', group.by = 'seurat_clusters')
-
-```
-
-
-We can however leverage the information of the RNA and the ATAC data together and see how that looks.
-
-
-```{r wnn_umap_plot, include=TRUE, eval=TRUE, fig.width = 7, fig.height = 7}
-knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
-
-# make a plot of the 2d UMAP of RNA and ATAC data
-DimPlot(mo_object, reduction = 'wnn.umap', group.by = 'seurat_clusters')
-
-```
-
-
-As you see, the clusters overlap quite well with the 2d UMAP. This is part because when the clusters were calculated, this was actually done on the ATAC and RNA data at the same time, instead of only on the RNA or ATAC data.
-
-
-## cell type annotation (old-fashioned way)
-
-One of the next steps we would usually do, is that we would try to see which exact cell type each cell belongs to. We can plot the expression of specific genes like we did in the Violinplot, but we can also plot the expression of specific genes on top of the UMAP.
-
-
-```{r wnn_feature_plot, include=TRUE, eval=TRUE, fig.width = 9, fig.height = 9}
-knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
-
-# make a plot of the 2d UMAP of RNA and ATAC data
-FeaturePlot(mo_object, reduction = 'wnn.umap', features = c('S100A9', 'CD4', 'CD8A', 'NKG7', 'MS4A1', 'GZMA', 'CD74'))
-
-```
-
-
-What we would do, is that we would check each cluster and match gene expression levels for those clusters to genes that are marker genes for specific cell types. As you can imagine, this is quite a labour-intensive job, as there are a lot of different marker genes out there. For example this is a relatively low resolution annotation, and it already has a ton of genes to check:
-
-
-```{r marker_gene_table, include=FALSE, eval=TRUE, fig.width = 9, fig.height = 9}
-knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
-
-# make table
-marker_df <- data.frame(
-  'celltype' = c('monocyte', 
-                 'CD4-positive, alpha-beta T cell', 
-                 'CD8-positive, alpha-beta T cell',
-                 'natural killer cell',
-                 'mature B cell', 
-                 'mature T cell', 
-                 'dendritic cell'), 
-  'markers' = c('CTSS, FCN1, NEAT1, LYZ, PSAP, S100A9, AIF1, MNDA, SERPINA1, TYROBP', 
-                'IL7R, MAL, LTB, CD4, LDHB, TPT1, TRAC, TMSB10, CD3D, CD3G', 
-                'CD8B, CD8A, CD3D, TMSB10, HCST, CD3G, LINC02446, CTSW, CD3E, TRAC', 
-                'NKG7, KLRD1, TYROBP, GNLY, FCER1G, PRF1, CD247, KLRF1, CST7, GZMB', 
-                'CD79A, RALGPS2, CD79B, MS4A1, BANK1, CD74, TNFRSF13C, HLA-DQA1, IGHM, MEF2C', 
-                'CD3D, TRDC, GZMK, KLRB1, NKG7, TRGC2, CST7, LYAR, KLRG1, GZMA', 
-                'CD74, HLA-DPA1, HLA-DPB1, HLA-DQA1, CCDC88A, HLA-DRA, HLA-DMA, CST3, HLA-DQB1, HLA-DRB1')
-)
-# show table
-kable(marker_df, caption = 'Marker genes for PBMCs')
-
-```
-
-## cell type annotation (the new way)
-
-Like we have data where there is both chromatin accessibility and gene expression, other multimodal datasets also exist. One technology is CITE-seq, where gene expression and cell surface proteins are measured. These surface marker proteins are the best way to to annotate cells to cell types, as these are much more reliable. One of those datasets is available here: <https://drive.google.com/drive/folders/1oooOROmQU3fi6irALp3YnLoTGbvdV1qw?usp=sharing>
-
-We can next load this object as well
-
-
-```{r load_reference, include=TRUE}
-knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
-
-# location of the reference
-reference_loc <- '/groups/umcg-franke-scrna/tmp04/external_datasets/azimuth_pbmc_reference/multi.h5seurat'
-# read the reference
-reference <- LoadH5Seurat(reference_loc)
-# update to latest version, as our query is also in this format
-reference <- UpdateSeuratObject(reference)
-
-```
-
-
-Now let's see how this reference looks
-
-
-```{r check_reference, include=TRUE, eval=TRUE}
-knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, max.print=10)
-
-# we'll make sure not to print too much
-options(max.print=10)
-
-# check the object by itself
-reference
-# check what we have for the assays
-reference@assays
-# and specifically for the SCT one
-reference@assays$SCT
-# ADT as well
-reference@assays$ADT
-
-```
-
-
-As this object was created with an older version of the library, you'll see that we are missing the 'layers' sublayer, just as with the chromatin data. That is not super important though. What is more curious is that we don't have an RNA or peaks assay, but instead have an SCT and ADT assay instead. The absence of the peaks assay is not strange, considering I told you this dataset has protein data instead of chromatin data. The ADT is the assay that has the protein data. The SCT assay is here instead of the RNA layer. The SCT assay also is expression data, but that has been normalized in a more specific manner. Again, the details are not super important, but we'll touch upon it in a bit.
-
-We can also check the 2d UMAP in this object
-
-
-```{r reference_umap_plot, include=TRUE, eval=TRUE, fig.width = 20, fig.height = 10}
-knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
-
-# make a plot of the 2d UMAP of the reference
-DimPlot(reference, reduction = 'wnn.umap')
-
-```
-
-
-As you can see, we are not plotting clusters here, but are going straight for the cell type anotations that were done. They could use protein in addition to RNA for annotations, which you would expect increases their ability to do these annotations.
-
-
-```{r wnn_reference_feature_plot, include=TRUE, eval=TRUE, fig.width = 9, fig.height = 9}
-knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
-
-# make a plot of the 2d UMAP of RNA and ATAC data
-FeaturePlot(reference, reduction = 'wnn.umap', features = rownames(reference@assays$ADT)[11:19])
-
-```
-
-
-We can use this more confident cell type annotation for our data as well, by projecting our cells on their dataset, and see where in 2d space they land based on their similarity. Then we can transfer the labels from this reference onto the cells in our dataset.
-
-One challenge still, is that our data was normalized different to the reference. That is quickly solved though, by using SCTransform on our data and doing downstream processing to make it comparable to the reference dataset
-
-
-```{r sct_query, include=TRUE, eval=TRUE, fig.width = 9, fig.height = 9}
-knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
-
-# set assay to RNA
-DefaultAssay(mo_object) <- 'RNA'
-# perform SCTransform
-mo_object <- SCTransform(mo_object)
-# do PCA based on SCT
-mo_object <- RunPCA(mo_object, assay = 'SCT')
-# and 2d UMAP
-mo_object <- RunUMAP(mo_object, assay = 'SCT', return.model = T, dims = 1:50)
-
-```
-
-
-Something we have not talked about yet is metadata. We have additional data for each cell that is not directly reflected in their expression/accessiblity/proteins. For example we can have information on from which donor the cells come from. The cell type annotations are usually also stored in the metadata. Let's take a look at the metadata of the reference.
-
-
-```{r reference_metadata, include=TRUE, eval=TRUE}
-knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
-
-# check the reference metadata
-head(reference@meta.data)
-
-```
-
-
-You'll see that there are a number of cell type annotations available. We can actually add all of those to our data. Let's try to finally do this cell type annotation.
-
-
-```{r reference_mapping, include=TRUE, eval=TRUE, fig.width = 9, fig.height = 9}
-knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
-
-# we'll define the function
-do_reference_mapping <- function(reference, query){
-  # find transfer anchors
-  anchors <- FindTransferAnchors(
-    reference = reference,
-    query = query,
-    normalization.method = "SCT",
-    reference.reduction = "spca",
-    dims = 1:50,
-    recompute.residuals = FALSE
-  )
-
-  # do the reference mapping
-  query <- MapQuery(
-    anchorset = anchors,
-    query = query,
-    reference = reference,
-    refdata = list(
-      celltype.azi.l1 = "celltype.l1",
-      celltype.azi.l2 = "celltype.l2",
-      celltype.azi.l3 = "celltype.l3",
-      celltype.azi.ADT = "ADT"
-    ),
-    reference.reduction = "spca",
-    reduction.model = "wnn.umap"
-  )
-  return(query)
-}
-
-# and perform the mapping
-mo_object <- do_reference_mapping(reference, mo_object)
-
-```
-
-
-If your computer is not up to snuff with enough memory, you might run out of memory here. Fortunately we can also just load the result
-
-
-```{r load_ct_object, include=TRUE, eval=FALSE}
-knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
-
-# set location of where we saved this object
-mo_object_loc <- '/groups/umcg-franke-scrna/tmp04/external_datasets/10x_multiome_10k_pbmcs/multimodal/10k_multimodal_object_processed.rds'
-# now load this object
-mo_object <- readRDS(mo_object_loc)
-
-```
-
-
-We can now look our metadata, and we'll see that we have predicted cell types
-
-
-```{r mo_metadata, include=TRUE, eval=TRUE}
-knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
-
-# check the reference metadata
-head(mo_object@meta.data)
-
-```
-
-
-Let's focus on L1 annotation for now, as plot quickly get cluttered with too many cell types. The group.by parameter in DimPlot allows you to plot any categorical value from the metadata onto the 2d UMAP.
-
-
-```{r wnn_l1_plot, include=TRUE, eval=TRUE, fig.width = 7, fig.height = 7}
-knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
-
-# make a plot of the 2d UMAP of RNA and ATAC data, and set the group.by as the celltype
-DimPlot(mo_object, reduction = 'wnn.umap', group.by = 'predicted.celltype.azi.l1')
-
-```
-
-
-That looks quite nice right? Let's plot that next to our clusters to see how well that overlaps. We'll plot the L2 annotations as well
-
-
-```{r wnn_l1_cluster_plot, include=TRUE, eval=TRUE, fig.width = 7, fig.height = 7}
-knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
-
-# make a plot of the 2d UMAP of RNA and ATAC data, and set the group.by as the celltype
-DimPlot(mo_object, reduction = 'wnn.umap', group.by = 'predicted.celltype.azi.l1')
-DimPlot(mo_object, reduction = 'wnn.umap', group.by = 'predicted.celltype.azi.l2')
-DimPlot(mo_object, reduction = 'wnn.umap', group.by = 'seurat_clusters')
-
-```
-
-
-we can also check how many cells we have of each cell type. and plot that
-
-
-```{r cell_type_abundances, include=TRUE, eval=TRUE, fig.width = 5, fig.height = 5}
-knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
-
-# get the number of cells for each cell type from the metadata
-cell_type_numbers_l1 <- data.frame(table(mo_object@meta.data[['predicted.celltype.azi.l1']]))
-# let's update the column names
-colnames(cell_type_numbers_l1) <- c('celltype', 'ncells')
-# and show that
-cell_type_numbers_l1
-
-# we calculate the fraction as well, as that is just the number divided by the total
-cell_type_numbers_l1[['fraccells']] <- cell_type_numbers_l1[['ncells']] / sum(cell_type_numbers_l1[['ncells']])
-
-# and we can make some plots
-ggplot(data = cell_type_numbers_l1, mapping = aes(x = celltype, y = fraccells, fill = celltype)) +
-  geom_bar(stat = 'identity') +
-  xlab('Cell type') +
-  ylab('Fraction of cells') +
-  ggtitle('Fraction of total cells per cell type')
-
-```
-
-
-There is a lot more that you can do with this type of data. You can compare the expression of genes between samples or cell types, check the cell type proportion difference between samples, compare cases/controls for example, correlate expression and accessiblity, correlate expression and protein abundance etc. For an example, you can see more of this dataset in action right here: github.com/royoelen/process_10x_multiome_10k_pmbc/
-
+[Show in New Window]
+
+An object of class Seurat 
+740602 features across 8454 samples within 3 assays 
+Active assay: RNA (36601 features, 2000 variable features)
+ 3 layers present: counts, data, scale.data
+ 2 other assays present: prediction.score.celltype.azi.l2, peaks
+ 5 dimensional reductions calculated: lsi, umap.atac, pca, umap.rna, wnn.umap
+$RNA
+Assay (v5) data with 36601 features for 8454 cells
+Top 10 variable features:
+ IGHA1, JCHAIN, IGKC, GNLY, TXNDC5, MZB1, PTGDS, IGHM, IGLC2, IGLC3 
+Layers:
+ counts, data, scale.data 
+
+$prediction.score.celltype.azi.l2
+Assay data with 31 features for 8454 cells
+First 10 features:
+ CD14 Mono, CD4 TCM, CD8 Naive, NK, CD8 TEM, CD16 Mono, B intermediate, CD4 Naive, CD4 CTL, B naive 
+
+$peaks
+ChromatinAssay data with 703970 features for 8454 cells
+Variable features: 2000 
+Genome: 
+Annotation present: FALSE 
+Motifs present: FALSE 
+Fragment files: 0 
+
+Assay (v5) data with 36601 features for 8454 cells
+Top 10 variable features:
+ IGHA1, JCHAIN, IGKC, GNLY, TXNDC5, MZB1, PTGDS, IGHM, IGLC2, IGLC3 
+Layers:
+ counts, data, scale.data 
+List of 3
+ $ counts    :Formal class 'dgCMatrix' [package "Matrix"] with 6 slots
+  .. ..@ i       : int [1:11711321] 14 24 25 30 44 53 57 60 62 71 ...
+  .. ..@ p       : int [1:8455] 0 4384 8175 10900 13331 16418 18488 21465 24574 27595 ...
+  .. ..@ Dim     : int [1:2] 36601 8454
+  .. ..@ Dimnames:List of 2
+  .. .. ..$ : NULL
+  .. .. ..$ : NULL
+  .. ..@ x       : num [1:11711321] 1 3 1 1 3 1 1 1 2 1 ...
+  .. ..@ factors : list()
+ $ data      :Formal class 'dgCMatrix' [package "Matrix"] with 6 slots
+  .. ..@ i       : int [1:11711321] 14 24 25 30 44 53 57 60 62 71 ...
+  .. ..@ p       : int [1:8455] 0 4384 8175 10900 13331 16418 18488 21465 24574 27595 ...
+  .. ..@ Dim     : int [1:2] 36601 8454
+  .. ..@ Dimnames:List of 2
+  .. .. ..$ : NULL
+  .. .. ..$ : NULL
+  .. ..@ x       : num [1:11711321] 0.388 0.884 0.388 0.388 0.884 ...
+  .. ..@ factors : list()
+ $ scale.data: num [1:2000, 1:8454] -0.1788 0.2879 -0.2038 -0.0186 -0.0237 ...
+
+[Show in New Window]
+
+10 x 10 sparse Matrix of class "dgCMatrix"
+                         
+ [1,] . . . . . . . . . .
+ [2,] . . . . . . . . . .
+ [3,] . . . . . . . . . .
+ [4,] . . . . . . . . . .
+ [5,] . . . . . . . . . .
+ [6,] . . . . . . . . . .
+ [7,] . . 1 . . . . . . .
+ [8,] . . . . . . . . . .
+ [9,] . . . . . . . . . .
+[10,] . . . . . . . . . .
+10 x 10 sparse Matrix of class "dgCMatrix"
+                                
+ [1,] . . .        . . . . . . .
+ [2,] . . .        . . . . . . .
+ [3,] . . .        . . . . . . .
+ [4,] . . .        . . . . . . .
+ [5,] . . .        . . . . . . .
+ [6,] . . .        . . . . . . .
+ [7,] . . 1.060886 . . . . . . .
+ [8,] . . .        . . . . . . .
+ [9,] . . .        . . . . . . .
+[10,] . . .        . . . . . . .
+             [,1]        [,2]        [,3]        [,4]        [,5]        [,6]        [,7]        [,8]        [,9]       [,10]
+ [1,] -0.03791318 -0.03791318 -0.03791318 -0.03791318 -0.03791318 -0.03791318 -0.03791318 -0.03791318 -0.03791318 -0.03791318
+ [ reached getOption("max.print") -- omitted 9 rows ]
+
+[Show in New Window]
+
+10 x 10 sparse Matrix of class "dgCMatrix"
+  [[ suppressing 10 column names ‘CCTCAATGTGGACCTG-1’, ‘GTTACTCGTGTCACGG-1’, ‘GTTCGCTTCCTAGTCC-1’ ... ]]
+                                      
+chr1-633913-634412 2 . 2 2 . 3 3 4 2 .
+chr1-776832-777331 . . . . . . . . . .
+chr1-778300-779360 . 2 3 2 1 1 2 1 2 3
+chr1-779783-780011 . . . . . . . . . .
+chr1-812327-813205 . . . . . . . . . .
+chr1-815171-815947 . . . . . . . . . .
+chr1-816213-816474 . . . . . . . . . .
+chr1-816671-818584 . . . . . . . . . .
+chr1-818584-819436 . . . . . . . . . .
+chr1-819699-820042 . . . . . . . . . .
+10 x 10 sparse Matrix of class "dgCMatrix"
+  [[ suppressing 10 column names ‘CCTCAATGTGGACCTG-1’, ‘GTTACTCGTGTCACGG-1’, ‘GTTCGCTTCCTAGTCC-1’ ... ]]
+                                                                                                                     
+chr1-633913-634412 0.7431291 .         0.7490364 0.7459897 .         0.9740965 0.9918467 1.164902 0.7481865 .        
+chr1-776832-777331 .         .         .         .         .         .         .         .        .         .        
+chr1-778300-779360 .         0.5816885 0.7921120 0.5881880 0.3362332 0.3343171 0.5970850 0.335253 0.5900464 0.7856849
+chr1-779783-780011 .         .         .         .         .         .         .         .        .         .        
+chr1-812327-813205 .         .         .         .         .         .         .         .        .         .        
+chr1-815171-815947 .         .         .         .         .         .         .         .        .         .        
+chr1-816213-816474 .         .         .         .         .         .         .         .        .         .        
+chr1-816671-818584 .         .         .         .         .         .         .         .        .         .        
+chr1-818584-819436 .         .         .         .         .         .         .         .        .         .        
+chr1-819699-820042 .         .         .         .         .         .         .         .        .         .        
+
+[Show in New Window]
+[Show in New Window]
+[Show in New Window]
+[Show in New Window]
+[Show in New Window]
+[Show in New Window]
+[Show in New Window]
+
+Validating h5Seurat file
+Initializing ADT with data
+Adding counts for ADT
+Adding variable feature information for ADT
+Adding miscellaneous information for ADT
+Initializing SCT with data
+Adding counts for SCT
+Adding variable feature information for SCT
+Adding miscellaneous information for SCT
+Adding reduction apca
+Adding cell embeddings for apca
+Adding feature loadings for apca
+Adding miscellaneous information for apca
+Adding reduction aumap
+Adding cell embeddings for aumap
+Adding miscellaneous information for aumap
+Adding reduction pca
+Adding cell embeddings for pca
+Adding feature loadings for pca
+Adding miscellaneous information for pca
+Adding reduction spca
+Adding cell embeddings for spca
+Adding feature loadings for spca
+Adding miscellaneous information for spca
+Adding reduction umap
+Adding cell embeddings for umap
+Adding miscellaneous information for umap
+Adding reduction wnn.umap
+Adding cell embeddings for wnn.umap
+Adding miscellaneous information for wnn.umap
+Adding graph wknn
+Adding graph wsnn
+Adding command information
+Adding cell-level metadata
+Adding miscellaneous information
+Adding tool-specific results
+Validating object structure
+Updating object slots
+Ensuring keys are in the proper structure
+Updating matrix keys for DimReduc ‘apca’
+Updating matrix keys for DimReduc ‘aumap’
+Updating matrix keys for DimReduc ‘pca’
+Updating matrix keys for DimReduc ‘spca’
+Updating matrix keys for DimReduc ‘umap’
+Updating matrix keys for DimReduc ‘wnn.umap’
+Ensuring keys are in the proper structure
+Ensuring feature names don't have underscores or pipes
+Updating slots in SCT
+Updating slots in ADT
+Updating slots in wknn
+Cannot find wknn in the object, setting default assay of wknn to SCT
+Updating slots in wsnn
+Cannot find wsnn in the object, setting default assay of wsnn to SCT
+Updating slots in apca
+Updating slots in aumap
+Setting aumap DimReduc to global
+Updating slots in pca
+Updating slots in spca
+Updating slots in umap
+Setting umap DimReduc to global
+Updating slots in wnn.umap
+Setting wnn.umap DimReduc to global
+Setting assay used for NormalizeData.ADT to ADT
+Validating object structure for SCTAssay ‘SCT’
+Validating object structure for Assay ‘ADT’
+Validating object structure for Graph ‘wknn’
+Validating object structure for Graph ‘wsnn’
+Validating object structure for DimReduc ‘apca’
+Validating object structure for DimReduc ‘aumap’
+Validating object structure for DimReduc ‘pca’
+Validating object structure for DimReduc ‘spca’
+Validating object structure for DimReduc ‘umap’
+Validating object structure for DimReduc ‘wnn.umap’
+Object representation is consistent with the most current Seurat version
+
+[Show in New Window]
+
+Rasterizing points since number of points exceeds 100,000.
+To disable this behavior set `raster=FALSE`
+
+R Console
+[Show in New Window]
+
+Warning: Could not find CD223 in the default search locations, found in ‘ADT’ assay insteadWarning: Could not find TCR-V-9 in the default search locations, found in ‘ADT’ assay insteadWarning: Could not find CD178 in the default search locations, found in ‘ADT’ assay insteadWarning: Could not find CD319 in the default search locations, found in ‘ADT’ assay insteadWarning: Could not find CD171 in the default search locations, found in ‘ADT’ assay insteadWarning: Could not find Siglec-8 in the default search locations, found in ‘ADT’ assay insteadWarning: Could not find CD340 in the default search locations, found in ‘ADT’ assay insteadRasterizing points since number of points exceeds 100,000.
+To disable this behavior set `raster=FALSE`
+Rasterizing points since number of points exceeds 100,000.
+To disable this behavior set `raster=FALSE`
+Rasterizing points since number of points exceeds 100,000.
+To disable this behavior set `raster=FALSE`
+Rasterizing points since number of points exceeds 100,000.
+To disable this behavior set `raster=FALSE`
+Rasterizing points since number of points exceeds 100,000.
+To disable this behavior set `raster=FALSE`
+Rasterizing points since number of points exceeds 100,000.
+To disable this behavior set `raster=FALSE`
+Rasterizing points since number of points exceeds 100,000.
+To disable this behavior set `raster=FALSE`
+Rasterizing points since number of points exceeds 100,000.
+To disable this behavior set `raster=FALSE`
+Rasterizing points since number of points exceeds 100,000.
+To disable this behavior set `raster=FALSE`
+
+R Console
+[Show in New Window]
+
+Running SCTransform on assay: RNA
+Running SCTransform on layer: counts
+vst.flavor='v2' set. Using model with fixed slope and excluding poisson genes.
+Variance stabilizing transformation of count matrix of size 22533 by 8454
+Model formula is y ~ log_umi
+Get Negative Binomial regression parameters per gene
+Using 2000 genes, 5000 cells
+Found 131 outliers - those will be ignored in fitting/regularization step
+
+Second step: Get residuals using fitted parameters for 22533 genes
+Computing corrected count matrix for 22533 genes
+Calculating gene attributes
+Wall clock passed: Time difference of 23.41406 secs
+Determine variable features
+Centering data matrix
+  |===============================================================================================================================================| 100%
+Getting residuals for block 1(of 2) for counts dataset
+Getting residuals for block 2(of 2) for counts dataset
+Centering data matrix
+  |===============================================================================================================================================| 100%
+Finished calculating residuals for counts
+Set default assay to SCT
+PC_ 1 
+Positive:  LYZ, S100A9, S100A8, VCAN, NAMPT, FCN1, PSAP, CD74, PLXDC2, SAT1 
+	   HLA-DRA, CST3, CTSS, IL1B, CXCL8, ZEB2, PLAUR, NEAT1, FTH1, LRMDA 
+	   PLCB1, SLC8A1, GAB2, LYN, CSF3R, ARHGAP26, CD83, HLA-DRB1, MNDA, ATP2B1 
+Negative:  RPS27, BCL11B, MALAT1, INPP4B, B2M, IL32, IL7R, CD69, SKAP1, TSHZ2 
+	   BCL2, RPS27A, BACH2, CAMK4, LTB, RPS29, TRBC1, RPL13A, CD247, RPS18 
+	   RPS12, RPL13, PRKCH, RORA, LEF1, CCL5, TRAC, RPS3, TRBC2, RPL30 
+PC_ 2 
+Positive:  BANK1, CD74, IGHM, AFF3, CD79A, IGKC, HLA-DRA, MS4A1, RALGPS2, EBF1 
+	   OSBPL10, PAX5, IGLC2, LINC00926, HLA-DPB1, CD79B, HLA-DPA1, FCRL1, CCSER1, HLA-DQB1 
+	   HLA-DQA1, IGHD, ADAM28, AP002075.1, PLEKHG1, ARHGAP24, TCF4, BLK, CD22, COBLL1 
+Negative:  S100A9, S100A8, VCAN, LYZ, NKG7, CCL5, GNLY, PLCB1, FOS, CD247 
+	   ANXA1, NAMPT, PRKCH, SRGN, IL32, JUN, ARHGAP26, TNFAIP3, CXCL8, BCL11B 
+	   DPYD, NEAT1, INPP4B, IL7R, RORA, TRBC1, FCN1, AOAH, SKAP1, PRF1 
+PC_ 3 
+Positive:  GNLY, NKG7, CCL5, PRF1, GZMB, CCL4, FGFBP2, CST7, LINGO2, SPON2 
+	   KLRD1, GZMA, GZMH, CTSW, KLRF1, CLIC3, BNC2, C1orf21, TGFBR3, MCTP2 
+	   CD247, FCGR3A, PYHIN1, MYBL1, SAMD3, IL2RB, TTC38, ADGRG1, KLRK1, LINC00299 
+Negative:  TSHZ2, EEF1A1, LYZ, LEF1, INPP4B, JUNB, FHIT, MAML2, S100A9, RPL11 
+	   BACH2, LTB, CAMK4, RPL13, RPS6, RPS27A, RPS12, RPL30, RPL34, AL589693.1 
+	   IL7R, PRKCA, BCL11B, RPS27, RPS3A, BCL2, S100A8, RPS18, RPL32, RPLP1 
+PC_ 4 
+Positive:  VCAN, IGHM, MALAT1, BANK1, ARHGAP24, S100A9, S100A8, CXCL8, PLCB1, RALGPS2 
+	   CD79A, BACH2, NAMPT, MS4A1, CSF3R, ACSL1, IGKC, PLAUR, PLCG2, EBF1 
+	   AFF3, SLC2A3, OSBPL10, PAX5, ARHGAP26, LINC00926, FCRL1, GAB2, DPYD, MAML2 
+Negative:  CST3, HLA-DRA, HLA-DPB1, HLA-DPA1, CD74, HLA-DRB1, FCGR3A, ACTB, TMSB4X, FCER1G 
+	   CDKN1C, EEF1A1, HLA-DQA1, S100A4, TMSB10, HLA-DRB5, FCER1A, HLA-DQB1, AIF1, LST1 
+	   FTL, PSAP, RPLP1, TCF7L2, IFI30, RPL41, PFN1, RPL10, B2M, RPL13A 
+PC_ 5 
+Positive:  FCGR3A, CDKN1C, TCF7L2, SAT1, MTSS1, MS4A7, PAPSS2, LST1, HES4, SMIM25 
+	   LYN, MALAT1, PLCG2, CSF1R, AC104809.2, WARS, IFITM3, FCER1G, VMO1, CD83 
+	   AIF1, MT-CO1, TBC1D8, PECAM1, MT-CO2, MT-ATP6, FMNL2, SLC8A1, MT-ND4, MT-ND5 
+Negative:  S100A9, S100A8, LYZ, VCAN, NKG7, S100A12, RPLP1, RPL13A, CCL5, GNLY 
+	   RPL13, EEF1A1, RPS18, PLCB1, RPS28, AC020656.1, FCN1, RPL41, RPS27, CD14 
+	   RPS2, RPLP2, RPL11, RPL19, RPL34, MNDA, RPS11, RPL23A, B2M, RPL37A 
+Warning: The default method for RunUMAP has changed from calling Python UMAP via reticulate to the R-native UWOT using the cosine metric
+To use Python UMAP via reticulate, set umap.method to 'umap-learn' and metric to 'correlation'
+This message will be shown once per sessionUMAP will return its model
+11:12:42 UMAP embedding parameters a = 0.9922 b = 1.112
+11:12:42 Read 8454 rows and found 50 numeric columns
+11:12:42 Using Annoy for neighbor search, n_neighbors = 30
+11:12:42 Building Annoy index with metric = cosine, n_trees = 50
+0%   10   20   30   40   50   60   70   80   90   100%
+[----|----|----|----|----|----|----|----|----|----|
+**************************************************|
+11:12:43 Writing NN index file to temp file /tmp/Rtmp1zqXC7/file236f5a439191d0
+11:12:43 Searching Annoy index using 1 thread, search_k = 3000
+11:12:45 Annoy recall = 100%
+11:12:46 Commencing smooth kNN distance calibration using 1 thread with target n_neighbors = 30
+11:12:47 Initializing from normalized Laplacian + noise (using RSpectra)
+11:12:48 Commencing optimization for 500 epochs, with 354762 positive edges
+Using method 'umap'
+0%   10   20   30   40   50   60   70   80   90   100%
+[----|----|----|----|----|----|----|----|----|----|
+**************************************************|
+11:12:56 Optimization finished
+
+[Show in New Window]
+Description:df [6 × 14]
+ 
+ 
+	
+nCount_ADT
+<dbl>
+	
+nFeature_ADT
+<int>
+	
+nCount_RNA
+<dbl>
+	
+nFeature_RNA
+<int>
+	
+orig.ident
+<chr>
+	
+lane
+<chr>
+	
+donor
+<chr>
+	
+time
+<chr>
+	
+celltype.l1
+<chr>
+	
+L1_AAACCCAAGAAACTCA	7430	221	10823	2915	P2_7	L1	P2	7	Mono	
+L1_AAACCCAAGACATACA	5949	211	5864	1617	P1_7	L1	P1	7	CD4 T	
+L1_AAACCCACAACTGGTT	6547	217	5067	1381	P4_3	L1	P4	3	CD8 T	
+L1_AAACCCACACGTACTA	3508	207	4786	1890	P3_7	L1	P3	7	NK	
+L1_AAACCCACAGCATACT	6318	219	6505	1621	P4_7	L1	P4	7	CD8 T	
+L1_AAACCCACATCAGTCA	5195	213	4332	1633	P3_3	L1	P3	3	CD8 T	
+6 rows | 1-10 of 14 columns
+[Show in New Window]
+
+Projecting cell embeddings
+Finding neighborhoods
+Finding anchors
+	Found 16050 anchors
+Finding integration vectors
+Finding integration vector weights
+0%   10   20   30   40   50   60   70   80   90   100%
+[----|----|----|----|----|----|----|----|----|----|
+**************************************************|
+Predicting cell labels
+Warning: Layer counts isn't present in the assay object; returning NULLPredicting cell labels
+Warning: Feature names cannot have underscores ('_'), replacing with dashes ('-')Warning: Layer counts isn't present in the assay object; returning NULLPredicting cell labels
+Warning: Feature names cannot have underscores ('_'), replacing with dashes ('-')Warning: Layer counts isn't present in the assay object; returning NULLTransfering 228 features onto reference data
+  |                                                  | 0 % ~calculating  rning: Layer counts isn't present in the assay object; returning NULLWarning: Layer counts isn't present in the assay object; returning NULL
+Integrating dataset 2 with reference dataset
+Finding integration vectors
+Integrating data
+  |++++++++++++++++++++++++++++++++++++++++++++++++++| 100% elapsed=03s  
+Computing nearest neighbors
+Running UMAP projection
+11:24:39 Read 8454 rows
+11:24:39 Processing block 1 of 1
+11:24:39 Commencing smooth kNN distance calibration using 1 thread with target n_neighbors = 15
+11:24:39 Initializing by weighted average of neighbor coordinates using 1 thread
+11:24:39 Commencing optimization for 67 epochs, with 126810 positive edges
+Using method 'umap'
+0%   10   20   30   40   50   60   70   80   90   100%
+[----|----|----|----|----|----|----|----|----|----|
+**************************************************|
+11:24:40 Finished
+
+[Show in New Window]
+Description:df [6 × 37]
+ 
+ 
+	
+orig.ident
+<fctr>
+	
+nCount_RNA
+<dbl>
+	
+nFeature_RNA
+<int>
+	
+barcode
+<chr>
+	
+barcode_1
+<chr>
+	
+RNA_snn_res.1.2
+<fctr>
+	
+seurat_clusters
+<fctr>
+	
+nCount_SCT
+<dbl>
+	
+GGAACCACAATAATCC-1	10x_10k_mo	21114	4384	GGAACCACAATAATCC	GGAACCACAATAATCC-1	19	33	3336	
+GTTCTTGTCCTCATCA-1	10x_10k_mo	19794	3791	GTTCTTGTCCTCATCA	GTTCTTGTCCTCATCA-1	19	33	3454	
+TGAGGTGCAATGAATG-1	10x_10k_mo	16717	2725	TGAGGTGCAATGAATG	TGAGGTGCAATGAATG-1	19	33	3722	
+TTATTGCTCAGGAACA-1	10x_10k_mo	5904	2431	TTATTGCTCAGGAACA	TTATTGCTCAGGAACA-1	15	18	3480	
+CTCATGCTCCAGGTTG-1	10x_10k_mo	7460	3087	CTCATGCTCCAGGTTG	CTCATGCTCCAGGTTG-1	8	15	3033	
+CTGACCAAGGGCTTAT-1	10x_10k_mo	4256	2070	CTGACCAAGGGCTTAT	CTGACCAAGGGCTTAT-1	10	4	3312	
+6 rows | 1-9 of 37 columns
+[Show in New Window]
+[Show in New Window]
+[Show in New Window]
+Description:df [8 × 2]
+celltype
+<fctr>
+	
+ncells
+<int>
+			
+B	480			
+CD4 T	3575			
+CD8 T	1439			
+DC	140			
+Mono	2178			
+NK	378			
+other	21			
+other T	243			
+8 rows
+data.frame
+8 x 2
+
+  |..                                       |   4% [header]                    
+
+processing file: hanze_multiomics_course.Rmd
+  |======================================================================| 100%
+Using method 'umap'
+0%   10   20   30   40   50   60   70   80   90   100%
+[----|----|----|----|----|----|----|----|----|----|
+**************************************************|
+  |................................         |  79% [reference_mapping]         
